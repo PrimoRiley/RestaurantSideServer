@@ -1,7 +1,11 @@
 import sqlite3
 from datetime import datetime
+import sys
 
 def init_db():
+
+    print("Initializing database.")
+
     with sqlite3.connect('restaurant.db') as conn:
         c = conn.cursor()
         # Drop existing tables if they exist
@@ -41,3 +45,12 @@ def init_db():
         ]
         c.executemany('INSERT OR IGNORE INTO orders (id, items, status, timestamp) VALUES (?, ?, ?, ?)', orders)
         conn.commit()
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        if sys.argv[1] == 'init_db':
+            init_db()
+        else:
+            print(f"Unknown command: {sys.argv[1]}")
+    else:
+        print("No command provided.")

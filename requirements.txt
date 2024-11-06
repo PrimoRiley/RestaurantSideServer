@@ -1,5 +1,4 @@
-Flask==2.1.1
+Flask==3.0.3
 requests==2.27.1
 pytest==7.1.2
 unittest-xml-reporting==3.0.4
-sqlite3==3.36.0

@@ -70,27 +70,33 @@ def create_order():
             items = [item.strip() for item in items.split(',')]
 
         # Check menu
-        with sqlite3.connect('restaurant.db') as conn:
-            c = conn.cursor()
-            unavailable_items = []
-            for item in items:
-                c.execute('SELECT available FROM menu WHERE name = ?', (item,))
-                result = c.fetchone()
-                if result is None or result[0] == 0:
-                    unavailable_items.append(item)
+        try:
+            with sqlite3.connect('restaurant.db') as conn:
+                c = conn.cursor()
+                unavailable_items = []
+                for item in items:
+                    c.execute('SELECT available FROM menu WHERE name = ?', (item,))
+                    result = c.fetchone()
+                    if result is None or result[0] == 0:
+                        unavailable_items.append(item)
 
-            if unavailable_items:
-                return jsonify({'error': f'Item(s) not available: {", ".join(unavailable_items)}'}), 400
-
-        # Create order
-        with sqlite3.connect('restaurant.db') as conn:
-            c = conn.cursor()
-            timestamp = datetime.now().isoformat()
-            c.execute('INSERT INTO orders (items, status, timestamp) VALUES (?, ?, ?)',
-                      (str(items), 'received', timestamp))
-            order_id = c.lastrowid
-            conn.commit()
-
+                if unavailable_items:
+                    return jsonify({'error': f'Item(s) not available: {", ".join(unavailable_items)}'}), 400
+        except sqlite3.Error as e:
+            return jsonify({'error': f'Failed to create order: {e}'}), 500
+        
+        try:
+            # Create order
+            with sqlite3.connect('restaurant.db') as conn:
+                c = conn.cursor()
+                timestamp = datetime.now().isoformat()
+                c.execute('INSERT INTO orders (items, status, timestamp) VALUES (?, ?, ?)',
+                        (str(items), 'received', timestamp))
+                order_id = c.lastrowid
+                conn.commit()
+        except sqlite3.Error as e:
+            return jsonify({'error': f'Failed to create order: {e}'}), 500
+        
         # Start a background thread to monitor driver availability and cancel the order if needed
         threading.Thread(target=monitor_driver_availability, args=(order_id,)).start()
 
@@ -100,18 +106,28 @@ def create_order():
         return jsonify({'error': str(e)}), 500
 
 
-# Route: Get an order's status by ID
+# Route: Get an order by ID
 @restaurant_app.route('/order/<int:order_id>', methods=['GET'])
 def get_order_status(order_id):
-    with sqlite3.connect('restaurant.db') as conn:
-        c = conn.cursor()
-        c.execute('SELECT status FROM orders WHERE id = ?', (order_id,))
-        result = c.fetchone()
-        
-        if result is None:
-            return jsonify({'error': 'Order not found'}), 404
-        
-        return jsonify({'order_id': order_id, 'status': result[0]}), 200
+    try:
+        with sqlite3.connect('restaurant.db') as conn:
+            c = conn.cursor()
+            c.execute('SELECT items, status, timestamp FROM orders WHERE id = ?', (order_id,))
+            result = c.fetchone()  
+    except sqlite3.Error as e:
+        return jsonify({'error': f'Failed to retrieve order: {e}'}), 500
+
+    if result is None:
+        return jsonify({'error': 'Order not found'}), 404
+    
+    items, status, timestamp = result
+    
+    return jsonify({
+        'order_id': order_id,
+        'items': items,
+        'status': status,
+        'timestamp': timestamp
+    }), 200
 
 
 # Route: Update an order's status (Restaurant only)
@@ -124,12 +140,16 @@ def update_order(order_id):
     if new_status not in valid_statuses:
         return jsonify({'error': 'Invalid status'}), 400
 
-    with sqlite3.connect('restaurant.db') as conn:
-        c = conn.cursor()
-        c.execute('UPDATE orders SET status = ? WHERE id = ?', (new_status, order_id))
-        if c.rowcount == 0:
-            return jsonify({'error': 'Order not found'}), 404
-        conn.commit()
+    try:
+        with sqlite3.connect('restaurant.db') as conn:
+            c = conn.cursor()
+            c.execute('UPDATE orders SET status = ? WHERE id = ?', (new_status, order_id))
+            if c.rowcount == 0:
+                return jsonify({'error': 'Order not found'}), 404
+            conn.commit()
+    except sqlite3.Error as e:
+        return jsonify({'error': f'Failed to update order: {e}'}), 500
+
 
     try:
         response = requests.patch(f'http://localhost:5001/uber/order/{order_id}', json={'status': new_status})
