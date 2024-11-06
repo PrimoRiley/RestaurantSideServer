@@ -3,7 +3,8 @@ import requests
 import threading
 import time
 from unittest.mock import patch
-from restaurant_api import restaurant_app, init_db
+from restaurant_api import restaurant_app
+from restaurant_db import init_db
 from ubereats_api import uber_app
 
 def mock_driver_response(url, *args, **kwargs):
@@ -28,18 +29,16 @@ def time_progression(start_time, increment=300):
 class TestRestaurantUberEatsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Start the restaurant app server
         init_db()  # Ensure fresh DB for each test run
         cls.restaurant_thread = threading.Thread(target=restaurant_app.run, kwargs={'port': 5000, 'debug': False, 'use_reloader': False})
         cls.restaurant_thread.setDaemon(True)  # Ensure the server thread exits when the main thread does
         cls.restaurant_thread.start()
 
-        # Start the Uber Eats app server
         cls.uber_thread = threading.Thread(target=uber_app.run, kwargs={'port': 5001, 'debug': False, 'use_reloader': False})
         cls.uber_thread.setDaemon(True)
         cls.uber_thread.start()
 
-        # Give the servers a moment to start
+        # Give servers a moment to start
         time.sleep(2)
 
     def test_get_menu(self):
@@ -94,12 +93,10 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
 
     @patch('requests.get', side_effect=mock_driver_response)
     def test_update_order_status_success(self, mock_get):
-        # Create an order first
         payload = {'items': 'Pizza'}
         create_response = requests.post('http://127.0.0.1:5000/order', json=payload)
         order_id = create_response.json()['order_id']
 
-        # Update the order status
         update_payload = {'status': 'preparing'}
         response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json=update_payload)
         self.assertEqual(response.status_code, 200)
@@ -108,12 +105,10 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
         self.assertEqual(updated_data['new_status'], 'preparing')
 
     def test_update_order_status_invalid_status(self):
-        # Create an order first
         payload = {'items': 'Pizza'}
         create_response = requests.post('http://127.0.0.1:5000/order', json=payload)
         order_id = create_response.json()['order_id']
 
-        # Try to update the order status with an invalid status
         update_payload = {'status': 'invalid_status'}
         response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json=update_payload)
         self.assertEqual(response.status_code, 400)
@@ -121,7 +116,6 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
         self.assertEqual(error_message, 'Invalid status')
 
     def test_update_order_status_order_not_found(self):
-        # Try to update an order that doesn't exist
         update_payload = {'status': 'preparing'}
         response = requests.patch('http://127.0.0.1:5000/order/9999', json=update_payload)  # Assuming this ID doesn't exist
         self.assertEqual(response.status_code, 404)
@@ -131,7 +125,7 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
     def test_create_order_no_driver_available(self):
 
         with patch('requests.get') as mock_get:
-            # Mock driver availability - driver is unavailable in every iteration
+            # Mock driver availability for this get request only
             mock_get.return_value.status_code = 200
             mock_get.return_value.json.return_value = {'driver_status': 'unavailable'}
             payload = {'items': 'Burger, Fries'}
@@ -144,7 +138,6 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
 
         # Check that the order has been cancelled
         response = requests.get(f'http://127.0.0.1:5000/order/{order_id}')
-        print("RESPONSE:", response)
         self.assertEqual(response.status_code, 404)
         error_message = response.json().get('error')
         self.assertEqual(error_message, 'Order not found')

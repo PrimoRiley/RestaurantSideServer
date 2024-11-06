@@ -1,58 +1,11 @@
-from flask import Flask, abort, request, jsonify
+from flask import Flask, request, jsonify
 import sqlite3
-from datetime import datetime, timedelta
-import random
+from datetime import datetime
 import time
 import requests
 import threading
 
 restaurant_app = Flask(__name__)
-
-def init_db():
-    with sqlite3.connect('restaurant.db') as conn:
-        c = conn.cursor()
-        # Drop existing tables if they exist
-        c.execute('DROP TABLE IF EXISTS menu')
-        c.execute('DROP TABLE IF EXISTS orders')
-
-        # Create a menu table
-        c.execute('''CREATE TABLE IF NOT EXISTS menu (
-                     id INTEGER PRIMARY KEY,
-                     name TEXT NOT NULL,
-                     price REAL NOT NULL,
-                     available BOOLEAN NOT NULL DEFAULT 1)''')
-        # Create an orders table
-        c.execute('''CREATE TABLE IF NOT EXISTS orders (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     items TEXT NOT NULL,
-                     status TEXT NOT NULL,
-                     timestamp TEXT NOT NULL)''')
-        
-        # Insert realistic test data into the menu table
-        menu_items = [
-            (1, 'Burger', 8.99, True),
-            (2, 'Fries', 2.99, True),
-            (3, 'Pizza', 12.99, True),
-            (4, 'Salad', 5.49, False),
-            (5, 'Chicken Wings', 9.99, True),
-            (6, 'Pasta', 11.49, True),
-            (7, 'Soda', 1.99, True),
-            (8, 'Ice Cream', 3.99, False)
-        ]
-        c.executemany('INSERT OR IGNORE INTO menu (id, name, price, available) VALUES (?, ?, ?, ?)', menu_items)
-        conn.commit()
-
-        # Insert realistic test data into the orders table
-        orders = [
-            (1, 'Burger, Fries', 'completed', datetime.now().isoformat()),
-            (2, 'Pizza', 'preparing', datetime.now().isoformat()),
-            (3, 'Chicken Wings, Soda', 'received', datetime.now().isoformat()),
-            (4, 'Pasta', 'ready', datetime.now().isoformat())
-        ]
-        c.executemany('INSERT OR IGNORE INTO orders (id, items, status, timestamp) VALUES (?, ?, ?, ?)', orders)
-        conn.commit()
-
-init_db()
 
 # Route: Provide Menu to Uber
 @restaurant_app.route('/menu', methods=['GET'])
@@ -75,7 +28,7 @@ def cancel_order_if_no_driver(order_id):
             c.execute('SELECT status FROM orders WHERE id = ?', (order_id,))
             result = c.fetchone()
             if result and result[0] == 'received':
-                # No driver has picked up the order, cancel it
+                # Delete unconfirmed order
                 c.execute('DELETE FROM orders WHERE id = ?', (order_id,))
                 conn.commit()
     except sqlite3.Error as e:
@@ -101,8 +54,7 @@ def monitor_driver_availability(order_id):
             if driver_status == 'available':
                 update_order_status_to_preparing(order_id)
                 return
-        # time.sleep(30)  # Check every 30 seconds
-    print("NEVER FOUNDDDD")
+        # time.sleep(30)  # Orignally meant to check every 30 seconds but adjusted for testing purposes
     cancel_order_if_no_driver(order_id)
 
 # Route: Let Uber Interact with to create order 
@@ -114,11 +66,10 @@ def create_order():
         return jsonify({'error': 'No items provided'}), 400
 
     try:
-        # Convert items to list (if necessary)
         if isinstance(items, str):
             items = [item.strip() for item in items.split(',')]
 
-        # Check if all items are available on the menu
+        # Check menu
         with sqlite3.connect('restaurant.db') as conn:
             c = conn.cursor()
             unavailable_items = []
@@ -131,7 +82,7 @@ def create_order():
             if unavailable_items:
                 return jsonify({'error': f'Item(s) not available: {", ".join(unavailable_items)}'}), 400
 
-        # Insert order into orders table
+        # Create order
         with sqlite3.connect('restaurant.db') as conn:
             c = conn.cursor()
             timestamp = datetime.now().isoformat()
@@ -140,13 +91,12 @@ def create_order():
             order_id = c.lastrowid
             conn.commit()
 
-        # Start the background thread to monitor driver availability and cancel the order if needed
+        # Start a background thread to monitor driver availability and cancel the order if needed
         threading.Thread(target=monitor_driver_availability, args=(order_id,)).start()
 
         return jsonify({'order_id': order_id, 'status': 'received'}), 201
 
     except Exception as e:
-        # Return an internal server error code if something goes wrong
         return jsonify({'error': str(e)}), 500
 
 
@@ -185,7 +135,6 @@ def update_order(order_id):
         response = requests.patch(f'http://localhost:5001/uber/order/{order_id}', json={'status': new_status})
         response.raise_for_status()
     except requests.RequestException as e:
-        print(f'HERE!!!!!! Failed to update Uber Eats: {str(e)}')
         return jsonify({'error': f'Failed to update Uber Eats: {str(e)}'}), 500
 
     return jsonify({'order_id': order_id, 'new_status': new_status}), 200
