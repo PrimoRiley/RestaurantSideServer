@@ -1,16 +1,35 @@
 import unittest
-import threading
 import requests
+import threading
 import time
+from unittest.mock import patch
 from restaurant_api import restaurant_app, init_db
 from ubereats_api import uber_app
-from unittest import mock
+
+def mock_driver_response(url, *args, **kwargs):
+    if '/uber/driver_status' in url:
+        return type('Response', (object,), {
+            "status_code": 200, 
+            "json": lambda *args, **kwargs: {'driver_status': 'available'}
+        })()
+    raise RuntimeError("Unhandled URL: " + url)
+
+def time_progression(start_time, increment=300):
+        """
+        Generator that simulates time progression.
+        Each call to time.time() will increment time by the given increment.
+        """
+        current_time = start_time
+        while True:
+            yield current_time
+            current_time += increment
+
 
 class TestRestaurantUberEatsIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # Start the restaurant app server
-        init_db()
+        init_db()  # Ensure fresh DB for each test run
         cls.restaurant_thread = threading.Thread(target=restaurant_app.run, kwargs={'port': 5000, 'debug': False, 'use_reloader': False})
         cls.restaurant_thread.setDaemon(True)  # Ensure the server thread exits when the main thread does
         cls.restaurant_thread.start()
@@ -23,119 +42,118 @@ class TestRestaurantUberEatsIntegration(unittest.TestCase):
         # Give the servers a moment to start
         time.sleep(2)
 
-    def test_place_order_success(self):
-        """ Test placing a successful order via Uber Eats """
-        # Mock driver status response to simulate driver availability
-        with mock.patch('requests.get') as mock_get:
-            mock_get.return_value.json.return_value = {'driver_status': 'available'}
-            mock_get.return_value.status_code = 200
-
-            # Place an order via Uber Eats
-            response = requests.post('http://127.0.0.1:5001/uber/order', json={'items': 'Burger, Fries'})
-            self.assertEqual(response.status_code, 201)
-            data = response.json()
-            self.assertIn('order_id', data)
-
-    @mock.patch('time.sleep', return_value=None)  # Instantly returns simulating the full timeout.
-    @mock.patch('sqlite3.connect')
-    def test_order_cancellation_after_no_driver(self, mock_connect, mock_sleep):
-        """ Test that the order is canceled after 15 minutes if no driver is available """
-        
-        # Mock database connection and cursor
-        mock_conn = mock.Mock()
-        mock_cursor = mock.Mock()
-        mock_connect.return_value = mock_conn
-        mock_conn.cursor.return_value = mock_cursor
-
-        # Mock driver status response to simulate driver unavailability
-        with mock.patch('requests.get') as mock_get:
-            mock_get.return_value.json.return_value = {'driver_status': 'unavailable'}
-            mock_get.return_value.status_code = 200
-
-            # Place an order with no driver available
-            response = requests.post('http://127.0.0.1:5000/order', json={'items': 'Burger, Fries'})
-            self.assertEqual(response.status_code, 400)
-            self.assertIn('error', response.json())
-            self.assertEqual(response.json()['error'], 'No driver available at the moment')
-
-            # Check that sleep was called for 15 minutes
-            mock_sleep.assert_called_once_with(900)
-
-            # Check that the order was deleted from the database
-            mock_cursor.execute.assert_any_call('DELETE FROM orders WHERE id = ?', mock.ANY)
-
-
-    def test_place_order_invalid_item(self):
-        """ Test placing an order with unavailable items """
-        response = requests.post('http://127.0.0.1:5001/uber/order', json={'items': 'Invalid Item'})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn('error', response.json())
-        self.assertEqual(response.json()['error'], 'Item not available.')
-
-    def test_create_order_missing_items(self):
-        """ Test creating an order with missing items """
-        response = requests.post('http://127.0.0.1:5000/order', json={})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn('error', response.json())
-        self.assertEqual(response.json()['error'], 'No items provided')
-
-    @mock.patch('requests.get', return_value=mock.Mock(json=lambda: {'driver_status': 'available'}, status_code=200))
-    def test_update_order_status_success(self, mock_get):
-        """ Test updating an order's status successfully """
-        # Create an order
-        response = requests.post('http://127.0.0.1:5000/order', json={'items': 'Pizza'})
-        self.assertEqual(response.status_code, 201)
-        order_id = response.json()['order_id']
-
-        # Update status to 'preparing'
-        response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json={'status': 'preparing'})
+    def test_get_menu(self):
+        response = requests.get('http://127.0.0.1:5000/menu')
         self.assertEqual(response.status_code, 200)
-        
-        # Verify Uber Eats received the status update by getting the orders list
-        response = requests.get('http://127.0.0.1:5001/uber/orders')
-        orders = response.json()
-        order_status = next((order for order in orders if order['order_id'] == order_id), None)
-        self.assertIsNotNone(order_status)
-        self.assertEqual(order_status['status'], 'preparing')
+        menu_items = response.json()
+        self.assertIsInstance(menu_items, list)
+        self.assertGreater(len(menu_items), 0)
+        for item in menu_items:
+            self.assertIn('id', item)
+            self.assertIn('name', item)
+            self.assertIn('price', item)
+            self.assertIn('available', item)
 
-    def test_update_order_status_invalid(self):
-        """ Test updating an order with an invalid status """
-        # Create an order
-        response = requests.post('http://127.0.0.1:5000/order', json={'items': 'Pizza'})
+    @patch('requests.get', side_effect=mock_driver_response)
+    def test_create_order_success(self, mock_get):
+        payload = {'items': 'Burger, Fries'}
+        response = requests.post('http://127.0.0.1:5000/order', json=payload)
         self.assertEqual(response.status_code, 201)
-        order_id = response.json()['order_id']
+        order_data = response.json()
+        self.assertIn('order_id', order_data)
+        self.assertEqual(order_data['status'], 'received')
 
-        # Attempt to update to an invalid status
-        response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json={'status': 'invalid_status'})
+    def test_create_order_item_not_available(self):
+        payload = {'items': 'Ice Cream'}  # Ice Cream is marked as unavailable in the DB
+        response = requests.post('http://127.0.0.1:5000/order', json=payload)
         self.assertEqual(response.status_code, 400)
-        self.assertIn('error', response.json())
-        self.assertEqual(response.json()['error'], 'Invalid status')
+        error_message = response.json().get('error')
+        self.assertIn('Item(s) not available', error_message)
 
-    def test_update_non_existent_order(self):
-        """ Test updating a non-existent order """
-        response = requests.patch('http://127.0.0.1:5000/order/999', json={'status': 'preparing'})
+    def test_create_order_invalid_items(self):
+        payload = {'items': 'Nonexistent Item'}
+        response = requests.post('http://127.0.0.1:5000/order', json=payload)
+        self.assertEqual(response.status_code, 400)
+        error_message = response.json().get('error')
+        self.assertIn('Item(s) not available', error_message)
+
+    def test_get_order_status_success(self):
+        order_id = 1
+        response = requests.get(f'http://127.0.0.1:5000/order/{order_id}')
+        self.assertEqual(response.status_code, 200)
+        order_status = response.json()
+        self.assertEqual(order_status['order_id'], order_id)
+        self.assertEqual(order_status['status'], 'completed')  # Update the expected status based on the initial DB setup
+
+
+    def test_get_order_status_not_found(self):
+        response = requests.get('http://127.0.0.1:5000/order/9999')  # Assuming this ID doesn't exist
         self.assertEqual(response.status_code, 404)
-        self.assertIn('error', response.json())
-        self.assertEqual(response.json()['error'], 'Order not found')
+        error_message = response.json().get('error')
+        self.assertEqual(error_message, 'Order not found')
 
-    def test_get_orders_from_uber(self):
-        """ Test getting orders from Uber Eats via restaurant server """
-        response = requests.get('http://127.0.0.1:5000/orders')
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertIsInstance(data, list)
+    @patch('requests.get', side_effect=mock_driver_response)
+    def test_update_order_status_success(self, mock_get):
+        # Create an order first
+        payload = {'items': 'Pizza'}
+        create_response = requests.post('http://127.0.0.1:5000/order', json=payload)
+        order_id = create_response.json()['order_id']
 
-    def test_driver_availability(self):
-        """ Test checking driver availability """
-        response = requests.get('http://127.0.0.1:5001/uber/driver_status')
+        # Update the order status
+        update_payload = {'status': 'preparing'}
+        response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json=update_payload)
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertIn(data['driver_status'], ['available', 'unavailable'])
+        updated_data = response.json()
+        self.assertEqual(updated_data['order_id'], order_id)
+        self.assertEqual(updated_data['new_status'], 'preparing')
+
+    def test_update_order_status_invalid_status(self):
+        # Create an order first
+        payload = {'items': 'Pizza'}
+        create_response = requests.post('http://127.0.0.1:5000/order', json=payload)
+        order_id = create_response.json()['order_id']
+
+        # Try to update the order status with an invalid status
+        update_payload = {'status': 'invalid_status'}
+        response = requests.patch(f'http://127.0.0.1:5000/order/{order_id}', json=update_payload)
+        self.assertEqual(response.status_code, 400)
+        error_message = response.json().get('error')
+        self.assertEqual(error_message, 'Invalid status')
+
+    def test_update_order_status_order_not_found(self):
+        # Try to update an order that doesn't exist
+        update_payload = {'status': 'preparing'}
+        response = requests.patch('http://127.0.0.1:5000/order/9999', json=update_payload)  # Assuming this ID doesn't exist
+        self.assertEqual(response.status_code, 404)
+        error_message = response.json().get('error')
+        self.assertEqual(error_message, 'Order not found')
+
+    def test_create_order_no_driver_available(self):
+
+        with patch('requests.get') as mock_get:
+            # Mock driver availability - driver is unavailable in every iteration
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.json.return_value = {'driver_status': 'unavailable'}
+            payload = {'items': 'Burger, Fries'}
+            response = requests.post('http://127.0.0.1:5000/order', json=payload) # Calls driver status
+            time.sleep(3)
+            self.assertEqual(response.status_code, 201)
+            order_data = response.json()
+            order_id = order_data['order_id']
+        
+
+        # Check that the order has been cancelled
+        response = requests.get(f'http://127.0.0.1:5000/order/{order_id}')
+        print("RESPONSE:", response)
+        self.assertEqual(response.status_code, 404)
+        error_message = response.json().get('error')
+        self.assertEqual(error_message, 'Order not found')
 
     @classmethod
     def tearDownClass(cls):
-        # The daemon threads will automatically stop when the main thread ends
+        # Terminate threads if needed
         pass
+
 
 if __name__ == '__main__':
     unittest.main()
